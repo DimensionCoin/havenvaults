@@ -9,6 +9,7 @@ import Deposit from "@/components/actions/Deposit";
 import Sell from "@/components/actions/Sell";
 import Withdraw from "@/components/actions/Withdraw";
 import { PublicKey } from "@solana/web3.js";
+import Move from "../actions/Move";
 
 /* -------------------------------- Types ---------------------------------- */
 
@@ -534,7 +535,12 @@ function MoveModal({
                 Invalid owner public key(s) provided.
               </div>
             ) : (
-              "hello"
+              <Move
+                depositOwner={move.depositOwner}
+                savingsOwner={move.savingsOwner}
+                defaultFrom={move.defaultFrom}
+                onSuccess={move.onSuccess}
+              />
             )}
           </div>
         </div>
