@@ -14,8 +14,8 @@ export const dynamic = "force-dynamic";
 
 /* ------------------------------ constants -------------------------------- */
 
-const DECIMALS = 6; // USDC
-const FEE_UI = 0.02; // fixed processing fee your relay takes
+const DECIMALS = 6;             // USDC
+const FEE_UI = 0.02;            // fixed processing fee your relay takes
 const DEFAULT_APP_URL = "http://localhost:3000";
 
 // Escrow public address where funds live until the claim is completed.
