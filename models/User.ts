@@ -75,7 +75,7 @@ const UserSchema = new Schema(
       unique: true,
       index: true,
     },
-    
+
     firstName: { type: String, trim: true },
     lastName: { type: String, trim: true },
 
@@ -139,6 +139,8 @@ const UserSchema = new Schema(
       acceptedAt: { type: Date },
       version: { type: String, default: "" },
     },
+    
+    displayName: { type: String, trim: true },
 
     /** Legal consents audit trail */
     consents: { type: [ConsentSchema], default: [] },
