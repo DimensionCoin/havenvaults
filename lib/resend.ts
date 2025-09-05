@@ -88,7 +88,7 @@ export async function sendClaimEmail(opts: {
                 <p style="font-size: 14px; color: #A1A1AA; margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.5px;">Amount Sent</p>
                 <p style="font-size: 32px; font-weight: 700; color: rgb(182, 255, 62); margin: 0;">$${amountUi.toFixed(
                   2
-                )}</p>
+                )} USD</p>
               </div>
 
               <p style="font-size: 16px; line-height: 24px; color: #F5F5F5; margin: 0 0 16px;">
