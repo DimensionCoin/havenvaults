@@ -4,6 +4,8 @@ import "./globals.css";
 import { Toaster } from "react-hot-toast";
 import PrivyProviders from "@/providers/PrivyProvider"; 
 import { UserProvider } from "@/providers/UserProvider";
+import UserGate from "@/components/shared/UserGate";
+
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -39,17 +41,19 @@ export default function RootLayout({
 
         <PrivyProviders>
           <UserProvider>
-            <div className="min-h-screen flex flex-col">
-              <main className="flex-1">
-                <div className="mx-auto w-full">{children}</div>
-              </main>
+            <UserGate>
+              <div className="min-h-screen flex flex-col">
+                <main className="flex-1">
+                  <div className="mx-auto w-full">{children}</div>
+                </main>
 
-              <footer className="border-t border-border">
-                <div className="mx-auto w-full max-w-6xl px-4 py-4 text-xs text-muted-foreground">
-                  © {new Date().getFullYear()} Haven
-                </div>
-              </footer>
-            </div>
+                <footer className="border-t border-border">
+                  <div className="mx-auto w-full max-w-6xl px-4 py-4 text-xs text-muted-foreground">
+                    © {new Date().getFullYear()} Haven
+                  </div>
+                </footer>
+              </div>
+            </UserGate>
           </UserProvider>
         </PrivyProviders>
       </body>
