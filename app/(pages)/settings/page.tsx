@@ -112,15 +112,8 @@ export default function SettingsPage() {
       addr.countryISO !== initial.addr.countryISO;
 
     type UpdatePayload = {
-      profile?: {
-        firstName?: string;
-        lastName?: string;
-        displayName?: string;
-      };
-      contact?: {
-        email?: string;
-        phoneNumber?: string;
-      };
+      profile?: { firstName?: string; lastName?: string; displayName?: string };
+      contact?: { email?: string; phoneNumber?: string };
       address?:
         | null
         | {
@@ -142,9 +135,7 @@ export default function SettingsPage() {
       };
     }
     if (contactChanged) {
-      payload.contact = {
-        phoneNumber: phoneNumber.trim() || undefined,
-      };
+      payload.contact = { phoneNumber: phoneNumber.trim() || undefined };
     }
     if (addressChanged) {
       const everyEmpty =
@@ -223,13 +214,13 @@ export default function SettingsPage() {
     const raw = (privyUser as unknown as Record<string, unknown>)?.linkedAccounts as unknown;
     const accounts = Array.isArray(raw) ? (raw as unknown[]) : [];
     if (!accounts.length) return false;
-    return accounts.some((acc) => {
-      if (!acc || typeof acc !== "object") return false;
-      const a = acc as Record<string, unknown>;
+    return accounts.some((a) => {
+      if (!a || typeof a !== "object") return false;
+      const o = a as Record<string, unknown>;
       return (
-        a.type === "wallet" &&
-        a.walletClientType === "privy" &&
-        a.chainType === "solana"
+        o.type === "wallet" &&
+        o.walletClientType === "privy" &&
+        o.chainType === "solana"
       );
     });
   }, [privyUser]);
@@ -266,7 +257,7 @@ export default function SettingsPage() {
         <div className="absolute -top-10 -right-20 w-32 h-32 bg-[rgb(182,255,62)] opacity-[0.06] rounded-full blur-2xl" />
 
         <div className="relative backdrop-blur-sm bg-white/[0.02] border border-white/10 rounded-2xl p-6">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <h1 className="text-3xl font-bold text-foreground mb-2">
                 Account Settings
@@ -275,11 +266,12 @@ export default function SettingsPage() {
                 Manage your Haven account information
               </p>
             </div>
-            <div className="flex gap-3">
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
               <Button
                 onClick={resetAll}
                 disabled={disabled || !diff?.changed || saveState === "saving"}
                 variant="outline"
+                className="text-sm px-4 py-2 sm:px-6 sm:py-3 bg-transparent"
               >
                 Reset Changes
               </Button>
@@ -287,6 +279,7 @@ export default function SettingsPage() {
                 onClick={saveAll}
                 disabled={disabled || !diff?.changed || saveState === "saving"}
                 variant="default"
+                className="text-sm px-4 py-2 sm:px-6 sm:py-3"
               >
                 {saveState === "saving" ? "Saving…" : "Save Changes"}
               </Button>
@@ -334,7 +327,7 @@ export default function SettingsPage() {
                 onChange={(e) => setDisplayName(e.target.value)}
                 disabled={disabled}
                 className="input"
-                placeholder={"How you\u2019d like to be addressed"}
+                placeholder="How you'd like to be addressed"
               />
             </Field>
           </div>
@@ -509,7 +502,7 @@ function Button({
   variant?: "default" | "outline";
 }) {
   const baseClasses =
-    "rounded-xl px-6 py-3 font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed";
+    "rounded-xl font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap";
   const variantClasses = {
     default:
       "bg-[rgb(182,255,62)] text-black hover:bg-[rgb(182,255,62)]/90 shadow-lg hover:shadow-xl",
