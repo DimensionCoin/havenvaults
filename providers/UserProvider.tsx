@@ -59,8 +59,10 @@ const PUBLIC_ROUTES = new Set<string>([
 ]);
 
 function isPublicPath(pathname: string) {
-  // Treat exact matches as public; extend if you have nested public routes
   if (PUBLIC_ROUTES.has(pathname)) return true;
+  // ✅ Treat all claim routes as public
+  if (pathname === "/claim" || pathname.startsWith("/claim/")) return true;
+  // (Optional) If you have a finish step like /claim/finish, the startsWith above covers it
   return false;
 }
 

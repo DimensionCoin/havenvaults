@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+// app/api/auth/signup/route.ts
+import { NextResponse, NextRequest } from "next/server";
 import { privy, extractEmail, extractEmbeddedSolana } from "@/lib/privy";
 import { connect } from "@/lib/db";
 import User from "@/models/User";
@@ -11,23 +12,35 @@ export const dynamic = "force-dynamic";
 
 const JWT_SECRET = process.env.JWT_SECRET!;
 const SESSION_DURATION = 60 * 60 * 24 * 7; // 7 days
-if (!JWT_SECRET) throw new Error("Missing JWT_SECRET");
 
-type DepositWallet = { walletId?: string; address?: string; chainType: "solana" };
+type DepositWallet = {
+  walletId?: string;
+  address?: string;
+  chainType: "solana";
+};
 
-// Read token from Authorization: Bearer ... or JSON {accessToken}
-async function getAccessToken(req: Request) {
+export async function POST(req: NextRequest) {
+  if (!JWT_SECRET) {
+    return NextResponse.json(
+      { error: "Server misconfigured" },
+      { status: 500 }
+    );
+  }
+
+  // Read URL params (do NOT read body yet)
+  const url = new URL(req.url);
+  const wantRedirect =
+    url.searchParams.get("redirect") === "1" ||
+    url.searchParams.get("redirect") === "true";
+
+  // Read body once (optional, for legacy clients that send {accessToken})
+  const body = await req.json().catch(() => null);
+  // Preferred: Authorization: Bearer <token>
   const auth = req.headers.get("authorization");
-  if (auth?.startsWith("Bearer ")) return auth.slice(7).trim();
-  try {
-    const body = await req.json().catch(() => null);
-    if (body?.accessToken) return String(body.accessToken);
-  } catch {}
-  return null;
-}
+  const headerToken = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : null;
+  const accessToken =
+    headerToken ?? (body?.accessToken ? String(body.accessToken) : null);
 
-export async function POST(req: Request) {
-  const accessToken = await getAccessToken(req);
   if (!accessToken) {
     return NextResponse.json(
       { error: "Missing access token" },
@@ -36,14 +49,14 @@ export async function POST(req: Request) {
   }
 
   try {
-    // 1) Verify Privy token → DID/session
+    // 1) Verify Privy token
     const claims = await privy.verifyAuthToken(accessToken);
     const privyId = claims.userId;
 
-    // 2) Fetch Privy user (fresh)
+    // 2) Fresh Privy user
     let privyUser = await privy.getUser(privyId);
 
-    // 3) Extract email (direct or via linked Google account)
+    // 3) Email (must exist)
     const email = extractEmail(privyUser);
     if (!email) {
       return NextResponse.json(
@@ -52,7 +65,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4) Ensure Solana embedded wallet exists. If not, create it server-side.
+    // 4) Ensure embedded Solana wallet
     let solWallet = extractEmbeddedSolana(privyUser);
     if (!solWallet) {
       try {
@@ -62,8 +75,7 @@ export async function POST(req: Request) {
           owner: { userId: privyId },
           idempotencyKey: idem,
         });
-
-        // Re-fetch user to get the linkedAccounts array updated
+        // Re-fetch to see link
         privyUser = await privy.getUser(privyId);
         solWallet = extractEmbeddedSolana(privyUser) ?? {
           walletId: created.id,
@@ -71,17 +83,14 @@ export async function POST(req: Request) {
           chainType: "solana",
         };
       } catch (e) {
-        // If wallet creation fails, proceed without blocking signup; you can handle later in onboarding
         console.error("Privy wallet create failed:", e);
       }
     }
 
-    // 5) Upsert user in our DB
+    // 5) Upsert user
     await connect();
-
     let user = await User.findOne({ privyId });
     if (!user) {
-      // guard duplicate email
       const dup = await User.findOne({ email });
       if (dup) {
         return NextResponse.json(
@@ -101,27 +110,24 @@ export async function POST(req: Request) {
 
       user = await User.create(doc);
     } else if (!user.depositWallet && solWallet) {
-      // backfill wallet for existing user with no wallet
       user.depositWallet = solWallet as DepositWallet;
       await user.save();
     }
 
-    // 6) App session cookie (JWT)
+    // 6) Set app session cookie
     const sessionToken = jwt.sign(
       { sub: user.privyId, userId: user._id.toString(), email: user.email },
       JWT_SECRET,
       { expiresIn: SESSION_DURATION }
     );
 
-    const onboarded = user.status === "active" && user.kycStatus === "approved";
-
-    const res = NextResponse.json({
+    const json = NextResponse.json({
       status: "ok",
-      onboarded,
+      onboarded: user.status === "active" && user.kycStatus === "approved",
       user: { id: user.id, email: user.email },
     });
 
-    res.cookies.set({
+    json.cookies.set({
       name: "__session",
       value: sessionToken,
       httpOnly: true,
@@ -131,7 +137,15 @@ export async function POST(req: Request) {
       maxAge: SESSION_DURATION,
     });
 
-    return res;
+    // Keep default behavior “no redirect”.
+    // If some legacy screen wants the old behavior, call /api/auth/signup?redirect=1
+    if (wantRedirect) {
+      return NextResponse.redirect(new URL("/onboarding", url.origin), {
+        headers: json.headers,
+      });
+    }
+
+    return json;
   } catch (err) {
     console.error("Signup finalize error:", err);
     return NextResponse.json(

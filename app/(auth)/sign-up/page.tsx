@@ -15,12 +15,11 @@ export default function SignUpPage() {
   const router = useRouter();
   const { ready, authenticated, getAccessToken } = usePrivy();
 
-  // shared UI state
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const finalizedRef = useRef(false);
 
-  // --- Google OAuth (only Google enabled) ---
+  /* -------------------------- Google OAuth login -------------------------- */
   const {
     initOAuth,
     loading: oauthLoading,
@@ -33,7 +32,7 @@ export default function SignUpPage() {
     },
   });
 
-  // --- Email OTP ---
+  /* ------------------------------ Email OTP ------------------------------ */
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
 
@@ -59,35 +58,45 @@ export default function SignUpPage() {
   const onSubmitCode = async () => {
     setErr(null);
     await loginWithCode({ code: code.trim() });
-    // finalize runs via effect
+    // finalize runs below when authenticated flips true
   };
 
-  // Finalize: exchange Privy access token for our app session (CREATE-OR-LOGIN)
+  /* -------------------------- Finalize (server) -------------------------- */
+  // After Privy finishes (authenticated=true), exchange the Privy token for
+  // an app session cookie by calling your API with Authorization: Bearer.
   const finalizeSignup = useMemo(
     () => async () => {
       try {
         setBusy(true);
         setErr(null);
 
-        const accessToken = await getAccessToken();
-        if (!accessToken) throw new Error("No Privy access token available");
+        const token = await getAccessToken?.();
+        if (!token) throw new Error("No Privy access token available");
 
-        const res = await fetch("/api/auth/signup", {
+        // Ask server to create-or-login user, set __session, and redirect to onboarding
+        const res = await fetch("/api/auth/signup?redirect=1", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Authorization: `Bearer ${token}` },
           credentials: "include",
           cache: "no-store",
-          body: JSON.stringify({ accessToken }),
         });
 
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || "Failed to finalize signup");
+        // If server responds with a redirect, follow it
+        if (res.redirected) {
+          window.location.assign(res.url);
+          return;
         }
 
-        const data = await res.json();
-        router.replace(data.onboarded ? "/dashboard" : "/onboarding");
-      } catch (e: unknown) {
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `Signup failed (${res.status})`);
+        }
+
+        // Fallback: if server didn’t redirect, decide client-side
+        const data = await res.json().catch(() => ({}));
+        const next = data?.onboarded ? "/dashboard" : "/onboarding";
+        router.replace(next);
+      } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
         setBusy(false);
         finalizedRef.current = false;
@@ -96,19 +105,14 @@ export default function SignUpPage() {
     [getAccessToken, router]
   );
 
-  // After Google or Email completes, Privy sets authenticated=true → finalize once
+  // When Privy indicates a session exists, finalize once.
   useEffect(() => {
     if (!ready || !authenticated || finalizedRef.current) return;
     finalizedRef.current = true;
     void finalizeSignup();
   }, [ready, authenticated, finalizeSignup]);
 
-  // Start Google flow
-  const startGoogle = async () => {
-    setErr(null);
-    await initOAuth({ provider: "google" });
-  };
-
+  /* ------------------------------- UI State ------------------------------ */
   const emailStatus = emailState.status;
   const isEmailAwaitingCode = emailStatus === "awaiting-code-input";
   const isEmailSubmitting = emailStatus === "submitting-code";
@@ -123,6 +127,7 @@ export default function SignUpPage() {
 
   const pickMessage = (e: unknown, fallback: string) =>
     e instanceof Error ? e.message : typeof e === "string" ? e : fallback;
+
   const oauthError =
     oauthState.status === "error"
       ? pickMessage(
@@ -137,8 +142,10 @@ export default function SignUpPage() {
           "Email login failed"
         )
       : null;
+
   const flowError = err || oauthError || emailError;
 
+  /* --------------------------------- JSX --------------------------------- */
   return (
     <div className="min-h-screen flex items-center justify-center text-white px-4">
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-6">
@@ -153,7 +160,10 @@ export default function SignUpPage() {
         {/* Google */}
         <div className="space-y-2">
           <button
-            onClick={startGoogle}
+            onClick={() => {
+              setErr(null);
+              void initOAuth({ provider: "google" });
+            }}
             disabled={isWorking}
             className="w-full rounded-lg bg-white/10 hover:bg-white/15 disabled:opacity-60 border border-white/20 px-4 py-2 transition flex items-center justify-center gap-2"
           >
@@ -204,7 +214,7 @@ export default function SignUpPage() {
                 disabled={isWorking}
               />
               <button
-                onClick={onSubmitCode}
+                onClick={() => void onSubmitCode()}
                 disabled={isWorking || code.trim().length < 4}
                 className="w-full rounded-lg bg-white/10 hover:bg-white/15 disabled:opacity-60 border border-white/20 px-4 py-2 transition"
               >
@@ -213,7 +223,7 @@ export default function SignUpPage() {
 
               <button
                 type="button"
-                onClick={onSendCode}
+                onClick={() => void onSendCode()}
                 disabled={isWorking}
                 className="w-full text-xs text-white/60 hover:text-white/80 underline underline-offset-4"
               >
@@ -222,7 +232,7 @@ export default function SignUpPage() {
             </>
           ) : (
             <button
-              onClick={onSendCode}
+              onClick={() => void onSendCode()}
               disabled={isWorking || !email.trim()}
               className="w-full rounded-lg bg-white/10 hover:bg-white/15 disabled:opacity-60 border border-white/20 px-4 py-2 transition"
             >

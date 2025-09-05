@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { Download, Upload, ArrowRightLeft, MoveRight, X } from "lucide-react";
 import Buy from "@/components/actions/Buy";
 import Deposit from "@/components/actions/Deposit";
+import UserTransfer from "@/components/actions/UserTransfer";
 import Sell from "@/components/actions/Sell";
 import Withdraw from "@/components/actions/Withdraw";
 import { PublicKey } from "@solana/web3.js";
@@ -29,7 +30,7 @@ type WithdrawConfig = {
 };
 
 type TransferConfig = {
-  /** Sender's chequing/deposit owner (base58). If omitted, UserTransfer will use current user from context. */
+  /** Sender's chequing/deposit owner (base58). If omitted, UserTransfer uses context. */
   depositOwner?: string;
   onSuccess?: (signature: string) => void;
 };
@@ -449,7 +450,16 @@ function TransferModal({
                 Invalid chequing (deposit) owner public key.
               </div>
             ) : (
-              "hello"
+              <div className="min-h-[320px]">
+                <UserTransfer
+                  fromOwnerBase58={transfer?.depositOwner}
+                  onSuccess={(sig) => {
+                    transfer?.onSuccess?.(sig);
+                    // optional: auto-close & refresh after success
+                     onClose();
+                  }}
+                />
+              </div>
             )}
           </div>
         </div>
