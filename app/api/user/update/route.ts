@@ -9,18 +9,22 @@ import { verifySession } from "@/lib/auth";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** ---- New enums ---- */
+const DisplayCurrencySchema = z.enum(["USD", "CAD", "EUR", "GBP", "AUD"]);
+const RiskLevelSchema = z.enum(["low", "medium", "high"]);
+
 /** ---- Schemas (all optional/partial) ---- */
 const ProfileSchema = z.object({
   firstName: z.string().trim().max(100).optional(),
   lastName: z.string().trim().max(100).optional(),
-  // You don’t persist displayName in Mongo (optional UI alias),
-  // but accept it so the client can send it; we just ignore it.
-  displayName: z.string().trim().max(100).optional(),
+  displayName: z.string().trim().max(100).optional(), // not persisted unless you add it later
 });
 
 const ContactSchema = z.object({
+  // 🚫 We will ignore email on the server even if someone tries to send it.
+  // Keep it here or remove it entirely — your call. Keeping it but ignoring adds safety.
   email: z.string().email().trim().toLowerCase().optional(),
-  phoneNumber: z.string().trim().max(40).optional(), // nullable by omission
+  phoneNumber: z.string().trim().max(40).optional(),
 });
 
 const AddressSchema = z
@@ -37,10 +41,11 @@ const AddressSchema = z
 const BodySchema = z.object({
   profile: ProfileSchema.optional(),
   contact: ContactSchema.optional(),
-  // address: pass an object to set/update, or null to clear
   address: AddressSchema.nullable().optional(),
-  // keep countryISO in sync if you want to set it independently
   countryISO: z.string().trim().length(2).optional(),
+  // ✅ New, both optional
+  displayCurrency: DisplayCurrencySchema.optional(),
+  riskLevel: RiskLevelSchema.optional(),
 });
 
 /** ---- Helpers ---- */
@@ -51,20 +56,25 @@ function jerr(status: number, error: string, details?: unknown) {
   );
 }
 
-/** ---- PATCH (the one your UI calls) ---- */
+/** ---- PATCH ---- */
 export async function PATCH(req: NextRequest) {
   try {
-    // Auth
     const cookie = req.cookies.get("__session")?.value;
     const claims = cookie ? verifySession(cookie) : null;
     if (!claims) return jerr(401, "Unauthorized");
 
-    // Parse body
     const raw = await req.json().catch(() => ({}));
     const parsed = BodySchema.safeParse(raw);
     if (!parsed.success)
       return jerr(400, "Invalid body", parsed.error.flatten());
-    const { profile, contact, address, countryISO } = parsed.data;
+    const {
+      profile,
+      contact,
+      address,
+      countryISO,
+      displayCurrency,
+      riskLevel,
+    } = parsed.data;
 
     await connect();
     const user = await User.findById(claims.userId);
@@ -78,22 +88,12 @@ export async function PATCH(req: NextRequest) {
         user.firstName = profile.firstName || undefined;
       if (profile.lastName !== undefined)
         user.lastName = profile.lastName || undefined;
-      // displayName ignored (not in schema) — keep for future if you add it
+      // displayName ignored unless you add it to the schema
     }
 
-    // Contact
+    // Contact (🚫 ignore email changes)
     if (contact) {
-      if (contact.email !== undefined && contact.email !== user.email) {
-        // Ensure uniqueness
-        const dup = await User.findOne({ email: contact.email.toLowerCase() });
-        if (dup && String(dup._id) !== String(user._id)) {
-          return jerr(409, "Email already in use");
-        }
-        user.email = contact.email.toLowerCase();
-        // you may also want to reset kyc or mark email-unverified here
-      }
       if (contact.phoneNumber !== undefined) {
-        // phoneNumber is select:false in schema; still writeable here
         (user as unknown as { phoneNumber?: string }).phoneNumber =
           contact.phoneNumber || undefined;
       }
@@ -120,9 +120,16 @@ export async function PATCH(req: NextRequest) {
       user.countryISO = countryISO.toUpperCase();
     }
 
+    // ✅ New: displayCurrency + riskLevel
+    if (displayCurrency !== undefined) {
+      user.displayCurrency = displayCurrency;
+    }
+    if (riskLevel !== undefined) {
+      user.riskLevel = riskLevel;
+    }
+
     await user.save();
 
-    // Return a minimal public view (mirror your /api/user/me shape)
     const result = {
       id: user.id,
       privyId: user.privyId,
@@ -130,7 +137,7 @@ export async function PATCH(req: NextRequest) {
       firstName: user.firstName ?? null,
       lastName: user.lastName ?? null,
       displayName:
-        (user as unknown as { displayName?: string }).displayName ?? null, // likely null unless you add to schema
+        (user as unknown as { displayName?: string }).displayName ?? null,
       countryISO: user.countryISO ?? null,
       displayCurrency: user.displayCurrency,
       status: user.status,
@@ -142,7 +149,6 @@ export async function PATCH(req: NextRequest) {
       savingsConsent: user.savingsConsent ?? undefined,
       createdAt: user.createdAt?.toISOString(),
       updatedAt: user.updatedAt?.toISOString(),
-      // address / phoneNumber are select:false normally; omit from public response
     };
 
     return NextResponse.json(result, { status: 200 });
@@ -152,7 +158,6 @@ export async function PATCH(req: NextRequest) {
   }
 }
 
-/** Optional: allow OPTIONS for any preflight (if you ever send custom headers) */
 export async function OPTIONS() {
   return NextResponse.json({ ok: true }, { status: 200 });
 }

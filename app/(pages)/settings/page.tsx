@@ -2,11 +2,11 @@
 "use client";
 
 import type React from "react";
-
 import { useEffect, useMemo, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useUser } from "@/providers/UserProvider";
 import ExportKeysModal from "./ExportKeysModal";
+import { toast } from "react-hot-toast"; // ✅ toasts
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -19,17 +19,19 @@ type AddressForm = {
   countryISO: string; // ISO-2
 };
 
+const CURRENCIES = ["USD", "CAD", "EUR", "GBP", "AUD"] as const;
+type DisplayCurrency = (typeof CURRENCIES)[number];
+type RiskLevel = "low" | "medium" | "high";
+
 export default function SettingsPage() {
   const { user, loading, refresh } = useUser();
   const { user: privyUser } = usePrivy();
 
   // ------------------------------ form state ------------------------------
+  // Keep fields empty by default and use placeholders from `user`
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
-  // optional UI alias (not persisted unless you add to schema)
   const [displayName, setDisplayName] = useState("");
-
-  const [email, setEmail] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
 
   const [addr, setAddr] = useState<AddressForm>({
@@ -38,106 +40,105 @@ export default function SettingsPage() {
     city: "",
     stateOrProvince: "",
     postalCode: "",
-    countryISO: "US",
+    countryISO: "",
   });
 
-  // initial snapshot for dirty checks
-  const [initial, setInitial] = useState<{
-    firstName: string;
-    lastName: string;
-    displayName: string;
-    email: string;
-    phoneNumber: string;
-    addr: AddressForm;
-  } | null>(null);
+  const [displayCurrency, setDisplayCurrency] = useState<DisplayCurrency | "">(
+    ""
+  );
+  const [riskLevel, setRiskLevel] = useState<RiskLevel | "">("");
 
+  // --- Export modal state ---
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportOpenKey, setExportOpenKey] = useState(0);
+  const openExport = () => {
+    setExportOpenKey((k) => k + 1);
+    setExportOpen(true);
+  };
+
+  // Reset to blank whenever user changes (so placeholders reflect latest)
   useEffect(() => {
-    if (loading || !user) return;
-
-    setFirstName(user.firstName ?? "");
-    setLastName(user.lastName ?? "");
-    setDisplayName((user as unknown as { displayName?: string }).displayName ?? "");
-
-    setEmail(user.email ?? "");
-    setPhoneNumber((user as unknown as { phoneNumber?: string }).phoneNumber ?? "");
-
+    setFirstName("");
+    setLastName("");
+    setDisplayName("");
+    setPhoneNumber("");
     setAddr({
-      line1: (user as unknown as { address?: { line1?: string } }).address?.line1 ?? "",
-      line2: (user as unknown as { address?: { line2?: string } }).address?.line2 ?? "",
-      city: (user as unknown as { address?: { city?: string } }).address?.city ?? "",
-      stateOrProvince:
-        (user as unknown as { address?: { stateOrProvince?: string } }).address?.stateOrProvince ?? "",
-      postalCode:
-        (user as unknown as { address?: { postalCode?: string } }).address?.postalCode ?? "",
-      countryISO: user.countryISO ?? "US",
+      line1: "",
+      line2: "",
+      city: "",
+      stateOrProvince: "",
+      postalCode: "",
+      countryISO: "",
     });
-
-    setInitial({
-      firstName: user.firstName ?? "",
-      lastName: user.lastName ?? "",
-      displayName: (user as unknown as { displayName?: string }).displayName ?? "",
-      email: user.email ?? "",
-      phoneNumber: (user as unknown as { phoneNumber?: string }).phoneNumber ?? "",
-      addr: {
-        line1: (user as unknown as { address?: { line1?: string } }).address?.line1 ?? "",
-        line2: (user as unknown as { address?: { line2?: string } }).address?.line2 ?? "",
-        city: (user as unknown as { address?: { city?: string } }).address?.city ?? "",
-        stateOrProvince:
-          (user as unknown as { address?: { stateOrProvince?: string } }).address?.stateOrProvince ?? "",
-        postalCode:
-          (user as unknown as { address?: { postalCode?: string } }).address?.postalCode ?? "",
-        countryISO: user.countryISO ?? "US",
-      },
-    });
-  }, [loading, user]);
+    setDisplayCurrency("");
+    setRiskLevel("");
+  }, [user?.id]);
 
   // ------------------------------ diff/payload -----------------------------
   const diff = useMemo(() => {
-    if (!initial) return null;
+    if (!user) return null;
 
-    const profileChanged =
-      firstName !== initial.firstName ||
-      lastName !== initial.lastName ||
-      displayName !== initial.displayName ||
-      phoneNumber !== initial.phoneNumber;
-
-    const contactChanged = phoneNumber !== initial.phoneNumber;
-
-    const addressChanged =
-      addr.line1 !== initial.addr.line1 ||
-      addr.line2 !== initial.addr.line2 ||
-      addr.city !== initial.addr.city ||
-      addr.stateOrProvince !== initial.addr.stateOrProvince ||
-      addr.postalCode !== initial.addr.postalCode ||
-      addr.countryISO !== initial.addr.countryISO;
-
-    type UpdatePayload = {
+    // Use the *current user values* as baseline; only send if the user picked something
+    const payload: {
       profile?: { firstName?: string; lastName?: string; displayName?: string };
-      contact?: { email?: string; phoneNumber?: string };
-      address?:
-        | null
-        | {
-            line1: string;
-            line2?: string;
-            city: string;
-            stateOrProvince: string;
-            postalCode: string;
-            country: string;
-          };
-      countryISO?: string;
-    };
-    const payload: UpdatePayload = {};
-    if (profileChanged) {
-      payload.profile = {
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
-        displayName: displayName.trim() || undefined,
+      contact?: { phoneNumber?: string };
+      address?: null | {
+        line1: string;
+        line2?: string;
+        city: string;
+        stateOrProvince: string;
+        postalCode: string;
+        country: string; // ISO-2
       };
+      countryISO?: string; // keep in sync with address.country
+      displayCurrency?: DisplayCurrency;
+      riskLevel?: RiskLevel;
+    } = {};
+
+    let changed = false;
+
+    // Profile
+    if (firstName || lastName || displayName) {
+      const pf: Record<string, string | undefined> = {};
+      if (firstName && firstName !== (user.firstName ?? "")) {
+        pf.firstName = firstName.trim();
+      }
+      if (lastName && lastName !== (user.lastName ?? "")) {
+        pf.lastName = lastName.trim();
+      }
+      if (
+        displayName &&
+        displayName !==
+          ((user as unknown as { displayName?: string }).displayName ?? "")
+      ) {
+        pf.displayName = displayName.trim() || undefined;
+      }
+      if (Object.keys(pf).length) {
+        payload.profile = pf;
+        changed = true;
+      }
     }
-    if (contactChanged) {
+
+    // Phone (email is intentionally not editable)
+    if (
+      phoneNumber &&
+      phoneNumber !==
+        ((user as unknown as { phoneNumber?: string })?.phoneNumber ?? "")
+    ) {
       payload.contact = { phoneNumber: phoneNumber.trim() || undefined };
+      changed = true;
     }
-    if (addressChanged) {
+
+    // Address: if the user typed anything in any address field, we either send a full address or null
+    const anyAddrInput =
+      addr.line1 ||
+      addr.line2 ||
+      addr.city ||
+      addr.stateOrProvince ||
+      addr.postalCode ||
+      addr.countryISO;
+
+    if (anyAddrInput) {
       const everyEmpty =
         !addr.line1.trim() &&
         !addr.line2.trim() &&
@@ -145,32 +146,78 @@ export default function SettingsPage() {
         !addr.stateOrProvince.trim() &&
         !addr.postalCode.trim();
 
-      payload.address = everyEmpty
-        ? null
-        : {
-            line1: addr.line1.trim(),
-            line2: addr.line2.trim() || undefined,
-            city: addr.city.trim(),
-            stateOrProvince: addr.stateOrProvince.trim(),
-            postalCode: addr.postalCode.trim(),
-            country: addr.countryISO.trim().toUpperCase(),
-          };
+      if (everyEmpty) {
+        payload.address = null;
+        payload.countryISO = user.countryISO ?? undefined;
+        changed = true;
+      } else {
+        const country = (addr.countryISO || user.countryISO || "US")
+          .trim()
+          .toUpperCase();
 
-      payload.countryISO = addr.countryISO.trim().toUpperCase();
+        const currentAddr = (
+          user as unknown as {
+            address?: {
+              line1?: string;
+              line2?: string;
+              city?: string;
+              stateOrProvince?: string;
+              postalCode?: string;
+            };
+          }
+        ).address;
+        payload.address = {
+          line1: (addr.line1 || currentAddr?.line1 || "").trim(),
+          line2: (addr.line2 || currentAddr?.line2 || "").trim() || undefined,
+          city: (addr.city || currentAddr?.city || "").trim(),
+          stateOrProvince: (
+            addr.stateOrProvince || currentAddr?.stateOrProvince || ""
+          ).trim(),
+          postalCode: (addr.postalCode || currentAddr?.postalCode || "").trim(),
+          country,
+        };
+        payload.countryISO = country;
+        changed = true;
+      }
     }
 
-    const changed = profileChanged || contactChanged || addressChanged;
+    // Display currency
+    if (displayCurrency && displayCurrency !== user.displayCurrency) {
+      payload.displayCurrency = displayCurrency;
+      changed = true;
+    }
+
+    // Risk level
+    if (riskLevel && riskLevel !== user.riskLevel) {
+      payload.riskLevel = riskLevel;
+      changed = true;
+    }
+
     return { changed, payload };
-  }, [initial, firstName, lastName, displayName, phoneNumber, addr]);
+  }, [
+    user,
+    firstName,
+    lastName,
+    displayName,
+    phoneNumber,
+    addr,
+    displayCurrency,
+    riskLevel,
+  ]);
 
   // ------------------------------- actions --------------------------------
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const disabled = loading || !user;
 
   const saveAll = async () => {
-    if (!diff?.changed) return;
-    try {
-      setSaveState("saving");
+    if (!diff?.changed) {
+      toast("No changes to save"); // uses your theme
+      return;
+    }
+
+    setSaveState("saving");
+
+    const run = async () => {
       const r = await fetch("/api/user/update", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -179,39 +226,64 @@ export default function SettingsPage() {
       });
       if (!r.ok) {
         const text = await r.text();
-        throw new Error(text || `Save failed (${r.status})`);
+        // surface server error message if available
+        throw new Error(
+          text || (r.statusText || `Save failed (${r.status})`).toString()
+        );
       }
-      setSaveState("saved");
+
+      // refresh user, then clear form fields so placeholders reflect latest data
       await refresh();
-      setInitial({
-        firstName,
-        lastName,
-        displayName,
-        email,
-        phoneNumber,
-        addr: { ...addr },
+      setFirstName("");
+      setLastName("");
+      setDisplayName("");
+      setPhoneNumber("");
+      setAddr({
+        line1: "",
+        line2: "",
+        city: "",
+        stateOrProvince: "",
+        postalCode: "",
+        countryISO: "",
       });
-      setTimeout(() => setSaveState("idle"), 900);
-    } catch (e) {
-      console.error(e);
-      setSaveState("error");
-      setTimeout(() => setSaveState("idle"), 1300);
-    }
+      setDisplayCurrency("");
+      setRiskLevel("");
+    };
+
+    await toast.promise(run(), {
+      loading: "Saving changes…",
+      success: "Settings saved",
+      error: (e) => e.message || "Save failed",
+    });
+
+    // flip the local UI badge
+    setSaveState("saved");
+    setTimeout(() => setSaveState("idle"), 900);
   };
 
   const resetAll = () => {
-    if (!initial) return;
-    setFirstName(initial.firstName);
-    setLastName(initial.lastName);
-    setDisplayName(initial.displayName);
-    setEmail(initial.email);
-    setPhoneNumber(initial.phoneNumber);
-    setAddr({ ...initial.addr });
+    // Just clear local edits — placeholders keep showing current user values
+    setFirstName("");
+    setLastName("");
+    setDisplayName("");
+    setPhoneNumber("");
+    setAddr({
+      line1: "",
+      line2: "",
+      city: "",
+      stateOrProvince: "",
+      postalCode: "",
+      countryISO: "",
+    });
+    setDisplayCurrency("");
+    setRiskLevel("");
+    toast("Changes reset"); // nice little confirmation
   };
 
-  // Detect any embedded Solana wallet (to enable the button)
+  // Detect embedded Solana wallet (unchanged)
   const hasEmbeddedSolana = useMemo(() => {
-    const raw = (privyUser as unknown as Record<string, unknown>)?.linkedAccounts as unknown;
+    const raw = (privyUser as unknown as Record<string, unknown>)
+      ?.linkedAccounts as unknown;
     const accounts = Array.isArray(raw) ? (raw as unknown[]) : [];
     if (!accounts.length) return false;
     return accounts.some((a) => {
@@ -225,71 +297,102 @@ export default function SettingsPage() {
     });
   }, [privyUser]);
 
-  // --------------- open/close modal; use a key to remount fresh ------------
-  const [exportOpen, setExportOpen] = useState(false);
-  const [exportOpenKey, setExportOpenKey] = useState(0);
-
-  const openExport = () => {
-    setExportOpenKey((k) => k + 1); // force a fresh mount each time
-    setExportOpen(true);
-  };
-
   // ------------------------------ loading UI ------------------------------
   if (loading) {
     return (
-      <main className="mx-auto w-full max-w-3xl p-6">
-        <div className="animate-pulse space-y-4">
-          <div className="h-7 w-40 bg-white/10 rounded" />
-          <div className="h-40 w-full bg-white/5 rounded-2xl" />
-          <div className="h-40 w-full bg-white/5 rounded-2xl" />
-          <div className="h-40 w-full bg-white/5 rounded-2xl" />
-        </div>
+      <main className="mx-auto w-full max-w-4xl p-6">
+        <HeaderSkeleton />
+        <SectionSkeleton />
+        <SectionSkeleton />
+        <SectionSkeleton />
       </main>
     );
   }
 
   // ------------------------------- page UI --------------------------------
   return (
-    <main className="mx-auto w-full max-w-3xl p-6">
-      <div className="relative mb-8">
-        {/* Background gradient effects */}
-        <div className="absolute -top-20 -left-20 w-40 h-40 bg-[rgb(182,255,62)] opacity-[0.08] rounded-full blur-3xl" />
-        <div className="absolute -top-10 -right-20 w-32 h-32 bg-[rgb(182,255,62)] opacity-[0.06] rounded-full blur-2xl" />
-
-        <div className="relative backdrop-blur-sm bg-white/[0.02] border border-white/10 rounded-2xl p-6">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <main className="mx-auto w-full max-w-4xl p-6">
+      {/* Page header with identity + status badges */}
+      <section className="mb-8 rounded-2xl border border-white/10 bg-white/[0.02] backdrop-blur-sm">
+        <div className="flex flex-col gap-6 p-6 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[rgb(182,255,62)]/20 text-[rgb(182,255,62)] font-bold">
+              {getInitials(
+                (user?.firstName ?? "") + " " + (user?.lastName ?? "")
+              )}
+            </div>
             <div>
-              <h1 className="text-3xl font-bold text-foreground mb-2">
-                Account Settings
+              <h1 className="text-2xl font-bold text-foreground">
+                {user?.firstName || user?.lastName
+                  ? `${user?.firstName ?? ""} ${user?.lastName ?? ""}`.trim()
+                  : "Your Haven Account"}
               </h1>
-              <p className="text-muted-foreground">
-                Manage your Haven account information
+              <p className="text-sm text-muted-foreground">
+                {user?.email}
+                {user?.displayCurrency ? (
+                  <>
+                    {" "}
+                    • Display:{" "}
+                    <span className="font-medium">{user.displayCurrency}</span>
+                  </>
+                ) : null}
               </p>
             </div>
-            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
-              <Button
-                onClick={resetAll}
-                disabled={disabled || !diff?.changed || saveState === "saving"}
-                variant="outline"
-                className="text-sm px-4 py-2 sm:px-6 sm:py-3 bg-transparent"
-              >
-                Reset Changes
-              </Button>
-              <Button
-                onClick={saveAll}
-                disabled={disabled || !diff?.changed || saveState === "saving"}
-                variant="default"
-                className="text-sm px-4 py-2 sm:px-6 sm:py-3"
-              >
-                {saveState === "saving" ? "Saving…" : "Save Changes"}
-              </Button>
-              <SaveBadge state={saveState} />
-            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge
+              label={`Status: ${user?.status ?? "pending"}`}
+              tone={user?.status === "active" ? "green" : "amber"}
+            />
+            <StatusBadge
+              label={`KYC: ${user?.kycStatus ?? "none"}`}
+              tone={
+                user?.kycStatus === "approved"
+                  ? "green"
+                  : user?.kycStatus === "pending"
+                  ? "amber"
+                  : "slate"
+              }
+            />
+            <StatusBadge
+              label={`Risk: ${user?.riskLevel ?? "low"}`}
+              tone={
+                user?.riskLevel === "high"
+                  ? "red"
+                  : user?.riskLevel === "medium"
+                  ? "amber"
+                  : "slate"
+              }
+            />
           </div>
         </div>
-      </div>
 
-      {/* Profile */}
+        {/* Sticky actions */}
+        <div className="flex flex-col gap-3 border-t border-white/10 p-4 md:flex-row md:items-center md:justify-end">
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={resetAll}
+              disabled={disabled || saveState === "saving"}
+              variant="outline"
+              className="px-5 py-2 bg-transparent"
+            >
+              Reset Changes
+            </Button>
+            <Button
+              onClick={saveAll}
+              disabled={disabled || !diff?.changed || saveState === "saving"}
+              variant="default"
+              className="px-5 py-2"
+            >
+              {saveState === "saving" ? "Saving…" : "Save Changes"}
+            </Button>
+            <SaveBadge state={saveState} />
+          </div>
+        </div>
+      </section>
+
+      {/* Profile (Name + Phone + Display Name + Email read-only) */}
       <Card title="Personal Information" icon="👤">
         <div className="grid gap-6 md:grid-cols-2">
           <Field label="First Name">
@@ -298,7 +401,7 @@ export default function SettingsPage() {
               onChange={(e) => setFirstName(e.target.value)}
               disabled={disabled}
               className="input"
-              placeholder="Enter your first name"
+              placeholder={user?.firstName || "Enter your first name"}
             />
           </Field>
           <Field label="Last Name">
@@ -307,9 +410,19 @@ export default function SettingsPage() {
               onChange={(e) => setLastName(e.target.value)}
               disabled={disabled}
               className="input"
-              placeholder="Enter your last name"
+              placeholder={user?.lastName || "Enter your last name"}
             />
           </Field>
+
+          <Field label="Email (read-only)">
+            <input
+              value={user?.email ?? ""}
+              readOnly
+              disabled
+              className="input opacity-70"
+            />
+          </Field>
+
           <Field label="Phone Number (Optional)">
             <input
               inputMode="tel"
@@ -317,9 +430,13 @@ export default function SettingsPage() {
               onChange={(e) => setPhoneNumber(e.target.value)}
               disabled={disabled}
               className="input"
-              placeholder="+1 (555) 123-4567"
+              placeholder={
+                ((user as unknown as { phoneNumber?: string }).phoneNumber ??
+                  "") || "+1 (555) 123-4567"
+              }
             />
           </Field>
+
           <div className="md:col-span-2">
             <Field label="Display Name (Optional)">
               <input
@@ -327,10 +444,58 @@ export default function SettingsPage() {
                 onChange={(e) => setDisplayName(e.target.value)}
                 disabled={disabled}
                 className="input"
-                placeholder="How you'd like to be addressed"
+                placeholder={
+                  ((user as unknown as { displayName?: string }).displayName ??
+                    "") ||
+                  "How you'd like to be addressed"
+                }
               />
             </Field>
           </div>
+        </div>
+      </Card>
+
+      {/* Preferences: Display Currency + Risk Level */}
+      <Card title="Preferences" icon="⚙️">
+        <div className="grid gap-6 md:grid-cols-2">
+          <Field label="Display Currency">
+            <select
+              value={displayCurrency}
+              onChange={(e) =>
+                setDisplayCurrency(e.target.value as DisplayCurrency)
+              }
+              disabled={disabled}
+              className="input"
+            >
+              <option value="">
+                {user?.displayCurrency
+                  ? `Current: ${user.displayCurrency}`
+                  : "Select currency"}
+              </option>
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Risk Level">
+            <select
+              value={riskLevel}
+              onChange={(e) => setRiskLevel(e.target.value as RiskLevel)}
+              disabled={disabled}
+              className="input"
+            >
+              <option value="">
+                {user?.riskLevel
+                  ? `Current: ${user.riskLevel}`
+                  : "Select risk level"}
+              </option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </Field>
         </div>
       </Card>
 
@@ -345,7 +510,13 @@ export default function SettingsPage() {
               }
               disabled={disabled}
               className="input"
-              placeholder="123 Main Street"
+              placeholder={
+                (
+                  user as unknown as {
+                    address?: { line1?: string };
+                  }
+                ).address?.line1 || "123 Main Street"
+              }
             />
           </Field>
           <Field label="Apartment, Suite, etc. (Optional)">
@@ -356,7 +527,13 @@ export default function SettingsPage() {
               }
               disabled={disabled}
               className="input"
-              placeholder="Apt 4B, Suite 200, etc."
+              placeholder={
+                (
+                  user as unknown as {
+                    address?: { line2?: string };
+                  }
+                ).address?.line2 || "Apt 4B, Suite 200"
+              }
             />
           </Field>
           <div className="grid gap-6 md:grid-cols-3">
@@ -368,7 +545,13 @@ export default function SettingsPage() {
                 }
                 disabled={disabled}
                 className="input"
-                placeholder="New York"
+                placeholder={
+                  (
+                    user as unknown as {
+                      address?: { city?: string };
+                    }
+                  ).address?.city || "New York"
+                }
               />
             </Field>
             <Field label="State / Province">
@@ -379,7 +562,13 @@ export default function SettingsPage() {
                 }
                 disabled={disabled}
                 className="input"
-                placeholder="NY"
+                placeholder={
+                  (
+                    user as unknown as {
+                      address?: { stateOrProvince?: string };
+                    }
+                  ).address?.stateOrProvince || "NY / ON"
+                }
               />
             </Field>
             <Field label="ZIP / Postal Code">
@@ -390,11 +579,17 @@ export default function SettingsPage() {
                 }
                 disabled={disabled}
                 className="input"
-                placeholder="10001"
+                placeholder={
+                  (
+                    user as unknown as {
+                      address?: { postalCode?: string };
+                    }
+                  ).address?.postalCode || "10001"
+                }
               />
             </Field>
           </div>
-          <Field label="Country">
+          <Field label="Country (ISO-2)">
             <input
               value={addr.countryISO}
               onChange={(e) =>
@@ -405,42 +600,75 @@ export default function SettingsPage() {
               }
               disabled={disabled}
               className="input"
-              placeholder="US"
+              placeholder={user?.countryISO || "US"}
               maxLength={2}
             />
           </Field>
         </div>
       </Card>
 
-      {/* Export Account Recovery Information */}
-      <Card title="Account Recovery" icon="🔐">
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Your account recovery information allows you to restore access to
-            your Haven account from another device. This information is highly
-            sensitive and should be stored securely offline.
-          </p>
-          <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
-            <p className="text-sm text-red-200">
-              <strong>Security Warning:</strong> Never share your recovery
-              information with anyone. Haven will never ask for this
-              information. Anyone with access to this data can control your
-              account.
-            </p>
-          </div>
-          <Button
-            onClick={openExport}
-            disabled={disabled || !hasEmbeddedSolana}
-            variant="outline"
-            className="w-full sm:w-auto bg-transparent"
-          >
-            Export Recovery Information
-          </Button>
-          {!hasEmbeddedSolana && (
+      {/* Security / Recovery */}
+      <Card title="Security & Recovery" icon="🔐">
+        <div className="grid gap-6 md:grid-cols-2">
+          <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              No recovery information available for this account type.
+              Your account recovery information allows you to restore access to
+              your Haven account from another device. Store it securely offline.
             </p>
-          )}
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
+              <p className="text-sm text-red-200">
+                <strong>Security Warning:</strong> Never share recovery
+                information. Anyone with access can control your account.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={openExport}
+                disabled={disabled || !hasEmbeddedSolana}
+                variant="outline"
+                className="bg-transparent"
+              >
+                Export Recovery Information
+              </Button>
+              {!hasEmbeddedSolana && (
+                <span className="text-xs text-muted-foreground">
+                  No recovery data available for this account type.
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+            <h3 className="mb-3 text-sm font-semibold text-foreground/90">
+              Login & Compliance
+            </h3>
+            <ul className="space-y-2 text-sm text-muted-foreground">
+              <li>
+                • Login Provider:{" "}
+                <span className="font-medium">
+                  {privyUser ? "Privy" : "Not connected"}
+                </span>
+              </li>
+              <li>
+                • KYC Status:{" "}
+                <span className="font-medium">{user?.kycStatus ?? "none"}</span>
+              </li>
+              <li>
+                • Account Status:{" "}
+                <span className="font-medium">{user?.status ?? "pending"}</span>
+              </li>
+              <li>
+                • Display Currency:{" "}
+                <span className="font-medium">
+                  {user?.displayCurrency ?? "—"}
+                </span>
+              </li>
+              <li>
+                • Risk Level:{" "}
+                <span className="font-medium">{user?.riskLevel ?? "—"}</span>
+              </li>
+            </ul>
+          </div>
         </div>
       </Card>
 
@@ -454,7 +682,7 @@ export default function SettingsPage() {
   );
 }
 
-/* Updated UI helpers with Haven's design system */
+/* ---------- UI helpers ---------- */
 function Card({
   title,
   icon,
@@ -524,25 +752,83 @@ function SaveBadge({ state }: { state: SaveState }) {
   if (state === "saved")
     return (
       <div className="flex items-center gap-2 px-3 py-1 bg-green-500/20 border border-green-500/30 rounded-lg">
-        <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-        <span className="text-xs text-green-400 font-medium">Saved</span>
+        <div className="h-2 w-2 rounded-full bg-green-400" />
+        <span className="text-xs font-medium text-green-400">Saved</span>
       </div>
     );
   if (state === "error")
     return (
       <div className="flex items-center gap-2 px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-lg">
-        <div className="w-2 h-2 bg-red-400 rounded-full"></div>
-        <span className="text-xs text-red-400 font-medium">Error</span>
+        <div className="h-2 w-2 rounded-full bg-red-400" />
+        <span className="text-xs font-medium text-red-400">Error</span>
       </div>
     );
   if (state === "saving")
     return (
       <div className="flex items-center gap-2 px-3 py-1 bg-[rgb(182,255,62)]/20 border border-[rgb(182,255,62)]/30 rounded-lg">
-        <div className="w-2 h-2 bg-[rgb(182,255,62)] rounded-full animate-pulse"></div>
-        <span className="text-xs text-[rgb(182,255,62)] font-medium">
+        <div className="h-2 w-2 rounded-full bg-[rgb(182,255,62)] animate-pulse" />
+        <span className="text-xs font-medium text-[rgb(182,255,62)]">
           Saving…
         </span>
       </div>
     );
   return null;
+}
+
+function StatusBadge({
+  label,
+  tone = "slate",
+}: {
+  label: string;
+  tone?: "green" | "amber" | "red" | "slate";
+}) {
+  const map: Record<string, string> = {
+    green:
+      "bg-green-500/15 text-green-300 border-green-500/25 shadow-[0_0_20px_rgba(34,197,94,0.2)]",
+    amber:
+      "bg-amber-500/15 text-amber-200 border-amber-500/25 shadow-[0_0_20px_rgba(245,158,11,0.15)]",
+    red: "bg-red-500/15 text-red-200 border-red-500/25 shadow-[0_0_20px_rgba(239,68,68,0.15)]",
+    slate:
+      "bg-white/10 text-slate-200 border-white/15 shadow-[0_0_20px_rgba(148,163,184,0.08)]",
+  };
+  return (
+    <span
+      className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1 text-xs font-medium ${map[tone]}`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current opacity-80" />
+      {label}
+    </span>
+  );
+}
+
+function HeaderSkeleton() {
+  return (
+    <section className="mb-8 rounded-2xl border border-white/10 bg-white/[0.02] p-6">
+      <div className="flex items-center gap-4">
+        <div className="h-12 w-12 rounded-full bg-white/10 animate-pulse" />
+        <div className="space-y-2">
+          <div className="h-5 w-40 bg-white/10 rounded animate-pulse" />
+          <div className="h-4 w-64 bg-white/10 rounded animate-pulse" />
+        </div>
+      </div>
+    </section>
+  );
+}
+function SectionSkeleton() {
+  return (
+    <section className="mb-8 rounded-2xl border border-white/10 bg-white/[0.02] p-6">
+      <div className="h-6 w-40 bg-white/10 rounded mb-4 animate-pulse" />
+      <div className="h-24 w-full bg-white/5 rounded animate-pulse" />
+    </section>
+  );
+}
+
+function getInitials(name: string) {
+  const parts = (name || "")
+    .split(" ")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const first = parts[0]?.[0] ?? "";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] ?? "" : "";
+  return (first + last).toUpperCase() || "U";
 }

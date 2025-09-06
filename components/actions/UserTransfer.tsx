@@ -7,23 +7,27 @@ import { useUser } from "@/providers/UserProvider";
 import { useRouter } from "next/navigation";
 import { useResolveDepositOwnerByEmail } from "@/hooks/useResolveDepositOwnerByEmail";
 import { useSponsoredUsdcTransfer } from "@/hooks/useSponsoredUsdcTransfer";
+import { toast } from "react-hot-toast"; // ✅ added
 
-const FEE_USDC = 0.02; // fixed processing fee
+const FEE_USDC = 0.025;
+const EXPLORER_CLUSTER = process.env.NEXT_PUBLIC_SOLANA_CLUSTER || "devnet";
 
 type Props = {
-  /** Optional override; otherwise uses current user's chequing/deposit owner address */
   fromOwnerBase58?: string;
   onSuccess?: (signature: string) => void;
 };
 
 type RecipientState = "idle" | "checking" | "user" | "nonuser" | "error";
 
+function round6(n: number) {
+  return Math.round(n * 1_000_000) / 1_000_000;
+}
+
 export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
   const router = useRouter();
   const { user } = useUser();
   const { getAccessToken } = usePrivy();
 
-  // Sender owner (chequing/deposit)
   const depositOwner = fromOwnerBase58 ?? user?.depositWallet?.address ?? "";
   const fromOwnerPk = useMemo<PublicKey | null>(() => {
     try {
@@ -34,22 +38,18 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
   }, [depositOwner]);
   const fromOwnerValid = !!fromOwnerPk;
 
-  // Display currency
   const targetCurrency =
     (user?.displayCurrency || "USD").toUpperCase() === "USDC"
       ? "USD"
       : (user?.displayCurrency || "USD").toUpperCase();
 
-  // UI state
   const [email, setEmail] = useState("");
   const [note, setNote] = useState("");
   const [amountLocalStr, setAmountLocalStr] = useState("");
 
-  // FX 1 USD -> target currency
   const [rate, setRate] = useState<number | null>(null);
   const [fxLoading, setFxLoading] = useState(false);
 
-  // Recipient resolution
   const {
     resolve,
     loading: resolving,
@@ -60,7 +60,6 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
   const [recipientState, setRecipientState] = useState<RecipientState>("idle");
   const [resolvedPk, setResolvedPk] = useState<PublicKey | null>(null);
 
-  // Transfer hook
   const {
     send,
     loading: sending,
@@ -84,7 +83,7 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
     [targetCurrency]
   );
 
-  // Load FX once per currency
+  // FX
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -112,7 +111,7 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
     };
   }, [targetCurrency, getAccessToken]);
 
-  // Debounced email lookup
+  // Recipient lookup
   const normEmail = (s: string) => s.trim().toLowerCase();
   const emailLooksValid = /\S+@\S+\.\S+/.test(normEmail(email));
 
@@ -150,11 +149,26 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
     };
   }, [email, emailLooksValid, resolve, setResolveErr]);
 
-  // Derived UI values
+  // Derived UI values (branch by recipient type)
   const amountLocal = Number(amountLocalStr);
   const validLocal = isFinite(amountLocal) && amountLocal > 0;
   const feeLocal = rate ? FEE_USDC * rate : null;
-  const netLocal = rate ? Math.max(0, amountLocal - FEE_USDC * rate) : null;
+
+  // Haven→Haven: user pays amount; they receive (amount - fee)
+  // Haven→Email:  user pays (amount + fee); they receive amount (full)
+  const youPayLocal =
+    rate == null
+      ? null
+      : recipientState === "nonuser"
+      ? amountLocal + (feeLocal ?? 0)
+      : amountLocal;
+
+  const theyReceiveLocal =
+    rate == null
+      ? null
+      : recipientState === "nonuser"
+      ? amountLocal
+      : Math.max(0, amountLocal - (feeLocal ?? 0));
 
   const sendingToSelf =
     recipientState === "user" &&
@@ -164,6 +178,13 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
 
   const rateInvalid = rate == null || rate <= 0;
 
+  // Validation: for Haven→Haven require amount > fee; for Email require amount > 0
+  const meetsMin =
+    recipientState === "nonuser"
+      ? validLocal
+      : validLocal &&
+        (feeLocal != null ? amountLocal > feeLocal + 1e-9 : false);
+
   const disabled =
     !fromOwnerValid ||
     sending ||
@@ -171,8 +192,7 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
     fxLoading ||
     rateInvalid ||
     !emailLooksValid ||
-    !validLocal ||
-    amountLocal <= (feeLocal ?? 0) ||
+    !meetsMin ||
     recipientState === "checking" ||
     recipientState === "error" ||
     sendingToSelf;
@@ -180,50 +200,68 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
   const submit = async () => {
     if (disabled || !rate || !fromOwnerPk) return;
 
-    const totalAmountUi = amountLocal / rate; // local → USD (USDC) UI
+    // ✅ toast: sending
+    const toastId = toast.loading("Transfer sending…");
+
+    // Convert local → USDC UI (what the user typed in the "Amount" field)
+    const amountUi = round6(amountLocal / rate);
     const token = (await getAccessToken?.()) || undefined;
 
     try {
+      if (
+        recipientState === "user" &&
+        resolvedPk &&
+        resolvedPk.equals(fromOwnerPk)
+      ) {
+        throw new Error("Recipient must be different from the sender.");
+      }
+
       if (recipientState === "user" && resolvedPk) {
-        // Direct transfer to existing Haven user
+        // Haven → Haven: server takes fee OUT of this amount
+        // Sender pays exactly what they typed
         const sig = await send({
           fromOwner: fromOwnerPk,
           toOwner: resolvedPk,
-          totalAmountUi,
+          totalAmountUi: amountUi,
           accessToken: token,
         });
         onSuccess?.(sig);
       } else if (recipientState === "nonuser") {
-        // Server handles: escrow funding + claim + email
+        // Haven → Email: server charges fee ON TOP; escrow receives full amount
         const r = await fetch("/api/transfers/email/create", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include", // includes __session cookie
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({
             recipientEmail: normEmail(email),
             fromOwner: fromOwnerPk.toBase58(),
-            amountUi: totalAmountUi,
-            note: note || undefined, // optional: you can store it later if you add schema support
+            amountUi, // FULL amount they will receive (fee added server-side)
+            note: note || undefined,
           }),
         });
         const j = await r.json();
         if (!r.ok || !j?.ok) {
           throw new Error(j?.error || `HTTP ${r.status}`);
         }
-        // success: server already moved funds to escrow AND sent email
+        if (j.escrowSignature && typeof j.escrowSignature === "string") {
+          onSuccess?.(j.escrowSignature);
+        }
       } else {
         throw new Error("Unable to determine recipient type.");
       }
 
-      // Refresh balances (soft + hard)
+      // ✅ toast: success
+      toast.success("Transfer sent", { id: toastId });
+
       setTimeout(() => {
         router.refresh();
         if (typeof window !== "undefined") window.location.reload();
       }, 250);
-    } catch {
-      // surfaced via sendErr / resolveErr or thrown here
+    } catch (e) {
+      // ✅ toast: error
+      const msg = e instanceof Error ? e.message : "Transfer failed";
+      toast.error(msg, { id: toastId });
+      // surfaced via hook or thrown above
     }
   };
 
@@ -231,7 +269,7 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
     if (resolving || recipientState === "checking")
       return "Looking up recipient…";
     if (recipientState === "user")
-      return "Haven user found — funds will arrive instantly.";
+      return "Haven user found — funds arrive instantly.";
     if (recipientState === "nonuser")
       return "Invite will be emailed — they can claim to Haven or off-ramp.";
     if (recipientState === "error")
@@ -280,8 +318,8 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="Dinner payback 🍝"
-          className="w-full rounded-xl border border-zinc-700 bg-zinc-800/50 px-4 py-3 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-[rgb(182,255,62)]/50 focus:border-[rgb(182,255,62)] transition-all"
           maxLength={120}
+          className="w-full rounded-xl border border-zinc-700 bg-zinc-800/50 px-4 py-3 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-[rgb(182,255,62)]/50 focus:border-[rgb(182,255,62)] transition-all"
         />
       </div>
 
@@ -300,30 +338,47 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
           placeholder="0.00"
           inputMode="decimal"
         />
+
         <div className="bg-zinc-800/30 rounded-lg p-3 space-y-1">
           {sendingToSelf && (
             <div className="text-xs text-red-400">
               You can’t send to your own account.
             </div>
           )}
+
+          <div className="flex justify-between text-sm">
+            <span className="text-zinc-400">
+              {recipientState === "nonuser"
+                ? "You pay (incl. fee):"
+                : "You pay:"}
+            </span>
+            <span className="text-white font-medium">{fmt(youPayLocal)}</span>
+          </div>
+
           <div className="flex justify-between text-sm">
             <span className="text-zinc-400">Processing fee:</span>
             <span className="text-white font-medium">{fmt(feeLocal)}</span>
           </div>
+
           <div className="flex justify-between text-sm">
             <span className="text-zinc-400">
               {recipientState === "nonuser"
-                ? "Escrow receives (est.):"
-                : "Recipient receives (est.):"}
+                ? "They receive (est.):"
+                : "They receive (est.):"}
             </span>
             <span className="text-[rgb(182,255,62)] font-semibold">
-              {fmt(netLocal)}
+              {fmt(theyReceiveLocal)}
             </span>
           </div>
-          {recipientState === "nonuser" && (
+
+          {recipientState === "nonuser" ? (
             <div className="text-[10px] text-zinc-500 mt-1">
-              We’ll email them a claim link. They can off-ramp or create a Haven
-              account.
+              We’ll email them a claim link. They receive the full amount; the
+              $0.02 fee is charged to you on top.
+            </div>
+          ) : (
+            <div className="text-[10px] text-zinc-500 mt-1">
+              Recipient receives your amount minus a $0.02 processing fee.
             </div>
           )}
         </div>
@@ -336,7 +391,11 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
         onClick={submit}
         className="w-full rounded-xl bg-[rgb(182,255,62)] text-black py-4 font-semibold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[rgb(182,255,62)]/90 transition-all duration-200 shadow-lg shadow-[rgb(182,255,62)]/20"
       >
-        {sending ? "Sending…" : `Send ${fmt(validLocal ? amountLocal : 0)}`}
+        {sending
+          ? "Sending…"
+          : recipientState === "nonuser"
+          ? `Send ${fmt(youPayLocal)} • They get ${fmt(theyReceiveLocal)}`
+          : `Send ${fmt(youPayLocal)} • They get ${fmt(theyReceiveLocal)}`}
       </button>
 
       {/* Status */}
@@ -351,7 +410,7 @@ export default function UserTransfer({ fromOwnerBase58, onSuccess }: Props) {
             Transaction: {lastSig}
           </div>
           <a
-            href={`https://explorer.solana.com/tx/${lastSig}?cluster=devnet`}
+            href={`https://explorer.solana.com/tx/${lastSig}?cluster=${EXPLORER_CLUSTER}`}
             target="_blank"
             rel="noreferrer"
             className="text-xs text-[rgb(182,255,62)] hover:underline mt-1 inline-block"

@@ -45,7 +45,7 @@ const HAVEN_PUBKEY_STR = requiredEnv("NEXT_PUBLIC_HAVEN_FEEPAYER_ADDRESS");
 
 // Fees
 const DECIMALS = 6; // USDC
-const FEE_UI = 0.02; // 2 cents
+const FEE_UI = 0.025; // 2 cents
 
 const USDC_MINT = new PublicKey(USDC_MINT_STR);
 const TREASURY_OWNER = new PublicKey(TREASURY_OWNER_STR);
@@ -148,7 +148,7 @@ function buildUserTransferTx(
   recentBlockhash: string
 ) {
   if (!Number.isFinite(totalUi) || totalUi <= FEE_UI) {
-    throw new Error("Amount must be greater than 0.02 USDC");
+    throw new Error("Amount must be greater than 0.025 USDC");
   }
 
   const toUnits = (ui: number) => Math.round(ui * 1_000_000); // 6dp
