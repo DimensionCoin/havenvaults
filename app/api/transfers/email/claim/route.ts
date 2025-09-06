@@ -1,6 +1,9 @@
+// app/api/transfers/email/claim/route.ts
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { randomUUID } from "crypto";
+
 import { connect } from "@/lib/db";
 import User from "@/models/User";
 import EmailClaim from "@/models/EmailClaim";
@@ -41,7 +44,6 @@ const ESCROW_PUBKEY = new PublicKey(
 );
 
 const DECIMALS = 6;
-// Keep batches modest to avoid tx size limits; tune if needed
 const MAX_PER_TX = 8;
 
 /* -------------------------------- schema -------------------------------- */
@@ -57,13 +59,16 @@ function jerr(status: number, error: string, extra?: unknown) {
 function requireSession(req: NextRequest) {
   const cookie = req.cookies.get("__session")?.value;
   const claims = cookie ? verifySession(cookie) : null;
-  if (!claims) {
-    throw new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json" },
-    });
+  if (!claims || !claims.userId || !claims.privyId) {
+    throw new Response(
+      JSON.stringify({ error: "Invalid session (missing userId or privyId)" }),
+      {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }
+    );
   }
-  return claims; // { privyId, userId, email }
+  return claims as { userId: string; privyId: string; email?: string };
 }
 
 async function detectTokenProgramId(conn: Connection, mint: PublicKey) {
@@ -72,6 +77,34 @@ async function detectTokenProgramId(conn: Connection, mint: PublicKey) {
   return info.owner.equals(TOKEN_2022_PROGRAM_ID)
     ? TOKEN_2022_PROGRAM_ID
     : TOKEN_PROGRAM_ID;
+}
+
+// very tolerant extractor for embedded solana wallet from Privy user
+function extractEmbeddedSolanaFromPrivyUser(
+  u: unknown
+): { walletId?: string; address?: string } | undefined {
+  const obj = (u ?? {}) as Record<string, unknown>;
+  const raw = obj["linkedAccounts"] as unknown;
+  const list = Array.isArray(raw) ? (raw as unknown[]) : [];
+  for (const acc of list) {
+    if (!acc || typeof acc !== "object") continue;
+    const a = acc as Record<string, unknown>;
+    const type = (a["type"] ?? a["kind"]) as unknown;
+    const chain = (a["chainType"] ?? a["chain"]) as unknown;
+    const client =
+      (a["walletClientType"] ?? a["clientType"] ?? a["connectorType"] ?? a["provider"]) as unknown;
+    const isWallet = type === "wallet";
+    const isSol = chain === "solana";
+    const isEmbedded = client === "embedded" || client === "privy";
+    if (isWallet && isSol && isEmbedded) {
+      const walletIdUnknown = a["walletId"] ?? a["id"];
+      const addressUnknown = a["address"] ?? a["walletAddress"];
+      const walletId = typeof walletIdUnknown === "string" ? walletIdUnknown : undefined;
+      const address = typeof addressUnknown === "string" ? addressUnknown : undefined;
+      return { walletId, address };
+    }
+  }
+  return undefined;
 }
 
 /* ---------------------------------- POST -------------------------------- */
@@ -84,7 +117,7 @@ export async function POST(req: NextRequest) {
     const parsed = BodySchema.safeParse(raw);
     if (!parsed.success) return jerr(400, "Invalid body");
 
-    // Validate token (but we’ll use it only to derive the intended recipient)
+    // Validate token (we use it to bind to intended recipient)
     const payload = verifyClaimToken(parsed.data.token);
     if (!payload?.recipientEmail || !payload?.expiresAt) {
       return jerr(401, "Invalid or expired token");
@@ -92,9 +125,8 @@ export async function POST(req: NextRequest) {
 
     await connect();
 
-    // Expired token? (We still won’t proceed if token is expired)
+    // Expired token?
     if (Date.now() > new Date(payload.expiresAt).getTime()) {
-      // Best-effort mark the exact token’s claim expired if it exists & pending
       if (payload.claimId) {
         const maybe = await EmailClaim.findOne({ tokenId: payload.claimId });
         if (maybe && maybe.status === "pending") {
@@ -108,22 +140,60 @@ export async function POST(req: NextRequest) {
     // Email must match token’s intended recipient
     const tokenEmail = payload.recipientEmail.toLowerCase();
     if ((session.email || "").toLowerCase() !== tokenEmail) {
-      return jerr(403, "Email mismatch. Sign in with the invited email.");
+      return jerr(403, "Email mismatch. Sign in with the invited email.", {
+        expected: tokenEmail,
+        got: (session.email || "").toLowerCase(),
+      });
     }
 
-    // Ensure recipient user + deposit wallet
+    // Load user
     const user = await User.findById(session.userId);
     if (!user) return jerr(404, "User record not found");
 
-    const onboarded = user.status === "active" && user.kycStatus === "approved";
-    const redirect = onboarded ? "/dashboard" : "/onboarding";
-
+    // Ensure user has a deposit wallet (create embedded wallet in Privy if missing)
     if (!user.depositWallet?.address) {
-      return jerr(409, "No deposit wallet on file. Please finish onboarding.");
-    }
-    const recipientOwner = new PublicKey(user.depositWallet.address);
+      const privy = getPrivy();
 
-    // ---- Gather ALL pending, non-expired claims for this email ----
+      // Try reading any existing embedded Solana wallet
+      let pUser = await privy.getUser(session.privyId);
+      let sol = extractEmbeddedSolanaFromPrivyUser(pUser);
+
+      // If none, create one
+      if (!sol?.address) {
+        const created = await privy.walletApi.createWallet({
+          chainType: "solana",
+          owner: { userId: session.privyId },
+          idempotencyKey: randomUUID(),
+        });
+
+        // best-effort refresh & normalize
+        pUser = await privy.getUser(session.privyId);
+        sol = extractEmbeddedSolanaFromPrivyUser(pUser) ?? {
+          walletId: created.id,
+          address: created.address,
+        };
+      }
+
+      if (!sol?.address) {
+        return jerr(
+          409,
+          "Unable to create embedded wallet — please try again."
+        );
+      }
+
+      type DepositWallet = { walletId?: string; address?: string; chainType: "solana" };
+      user.depositWallet = {
+        walletId: sol.walletId,
+        address: sol.address,
+        chainType: "solana",
+      } as DepositWallet;
+      await user.save();
+    }
+
+    // Recipient owner pubkey
+    const recipientOwner = new PublicKey(user.depositWallet!.address!);
+
+    // Gather ALL pending, non-expired claims for this email
     const now = new Date();
     const pending = await EmailClaim.find({
       recipientEmail: tokenEmail,
@@ -131,8 +201,11 @@ export async function POST(req: NextRequest) {
       tokenExpiresAt: { $gt: now },
     }).sort({ createdAt: 1 });
 
+    // If nothing to do, still return a redirect hint
+    const onboarded = user.status === "active" && user.kycStatus === "approved";
+    const redirect = onboarded ? "/dashboard" : "/onboarding";
+
     if (pending.length === 0) {
-      // Nothing to do – but we still give the client a redirect hint
       return NextResponse.json({
         ok: true,
         claimedCount: 0,
@@ -141,7 +214,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ---- Prepare Solana transfer(s) in batches ----
+    // Prepare Solana transfers (batched)
     const conn = new Connection(SOLANA_RPC, "confirmed");
     const tokenProgramId = await detectTokenProgramId(conn, USDC_MINT);
 
@@ -158,7 +231,6 @@ export async function POST(req: NextRequest) {
       tokenProgramId
     );
 
-    // Ensure ATAs on the first tx only (idempotent)
     const ensureEscrowAtaIx = createAssociatedTokenAccountIdempotentInstruction(
       ESCROW_PUBKEY,
       escrowAta,
@@ -175,7 +247,6 @@ export async function POST(req: NextRequest) {
         tokenProgramId
       );
 
-    // Chunk claims
     const chunks: (typeof pending)[] = [];
     for (let i = 0; i < pending.length; i += MAX_PER_TX) {
       chunks.push(pending.slice(i, i + MAX_PER_TX));
@@ -190,10 +261,10 @@ export async function POST(req: NextRequest) {
 
       const transferIxs: TransactionInstruction[] = group.map((cl) =>
         createTransferCheckedInstruction(
-          escrowAta, // source (escrow ATA)
+          escrowAta,
           USDC_MINT,
-          recipientAta, // dest (recipient ATA)
-          ESCROW_PUBKEY, // authority
+          recipientAta,
+          ESCROW_PUBKEY,
           Number(cl.amountUnits),
           DECIMALS,
           [],
@@ -250,6 +321,7 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     if (e instanceof Response) throw e;
     const msg = e instanceof Error ? e.message : String(e);
+    // Keep the error readable; don’t dump stack in prod responses
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

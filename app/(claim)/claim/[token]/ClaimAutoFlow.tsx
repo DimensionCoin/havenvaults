@@ -13,9 +13,8 @@ function extractPrivyEmail(u: unknown): string {
     const addr = (ef as Record<string, unknown>)["address"];
     if (typeof addr === "string" && addr) return addr;
   }
-  if (typeof obj["email"] === "string" && obj["email"]) {
+  if (typeof obj["email"] === "string" && obj["email"])
     return String(obj["email"]);
-  }
   const linkedRaw = obj["linkedAccounts"] as unknown;
   const linked = Array.isArray(linkedRaw) ? (linkedRaw as unknown[]) : [];
   for (const acc of linked) {
@@ -119,6 +118,49 @@ export default function ClaimAutoFlow({
     [getAccessToken]
   );
 
+  /**
+   * ALWAYS establish the app session cookie by calling /api/auth/signup.
+   * It’s idempotent and sets/refreshes the cookie even for existing users.
+   * We then re-probe /api/user/me to confirm the cookie is live in this tab.
+   */
+  const ensureAppSession = useCallback(async () => {
+    // 1) get Privy token
+    const privyToken = await getPrivyToken();
+    if (!privyToken) return false;
+
+    // 2) call signup (idempotent)
+    const signupRes = await fetch("/api/auth/signup", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${privyToken}` },
+      credentials: "include",
+    });
+
+    if (!signupRes.ok) {
+      // If the cookie was already valid, we might still be fine—probe below.
+      // But most commonly this indicates a real auth error.
+      // Fall through to probe; we’ll return false if probe fails.
+    }
+
+    // 3) give the browser a breath to persist cookies (Safari/iOS)
+    await wait(200);
+
+    // 4) probe
+    const probe = await fetch("/api/user/me", {
+      credentials: "include",
+      cache: "no-store",
+    });
+
+    if (probe.ok) return true;
+
+    // 5) last-chance retry once after a short pause
+    await wait(250);
+    const probe2 = await fetch("/api/user/me", {
+      credentials: "include",
+      cache: "no-store",
+    });
+    return probe2.ok;
+  }, [getPrivyToken]);
+
   const privyEmail = useMemo(
     () => extractPrivyEmail(user).toLowerCase(),
     [user]
@@ -152,24 +194,11 @@ export default function ClaimAutoFlow({
             );
           }
 
-          // Create __session cookie BEFORE hitting summary/list
-          const privyToken = await getPrivyToken();
-          if (!privyToken)
-            throw new Error("Failed to obtain Privy access token.");
+          // ✅ Establish/refresh the app session cookie unconditionally.
+          const sessionOk = await ensureAppSession();
+          if (!sessionOk) throw new Error("Could not establish app session.");
 
           setStep("loadingSummary");
-          const signupRes = await fetch("/api/auth/signup", {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              Authorization: `Bearer ${privyToken}`,
-            },
-            credentials: "include",
-          });
-          if (!signupRes.ok) {
-            const j = await signupRes.json().catch(() => ({}));
-            throw new Error(j.error || `Signup failed (${signupRes.status})`);
-          }
 
           // Fetch summary + list in parallel
           const [sumRes, listRes] = await Promise.all([
@@ -235,31 +264,20 @@ export default function ClaimAutoFlow({
     token,
     recipientEmailExpected,
     expiresAt,
-    getPrivyToken,
+    ensureAppSession,
   ]);
 
-  // Single CTA: claim ALL (the API already claims everything pending)
+  // Single CTA: claim ALL (server auto-creates wallet if missing)
   const claimAll = useCallback(async () => {
     if (runningRef.current) return;
     runningRef.current = true;
     setError(null);
     try {
       setStep("signup");
-      const privyToken = await getPrivyToken();
-      if (!privyToken) throw new Error("Failed to obtain Privy access token.");
 
-      const signupRes = await fetch("/api/auth/signup", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          Authorization: `Bearer ${privyToken}`,
-        },
-        credentials: "include",
-      });
-      if (!signupRes.ok) {
-        const j = await signupRes.json().catch(() => ({}));
-        throw new Error(j.error || `Signup failed (${signupRes.status})`);
-      }
+      // ✅ Re-ensure session right before claim
+      const ok = await ensureAppSession();
+      if (!ok) throw new Error("Could not establish app session.");
 
       setStep("claimingAll");
       const res = await fetch("/api/transfers/email/claim", {
@@ -279,7 +297,7 @@ export default function ClaimAutoFlow({
       setError(e instanceof Error ? e.message : String(e));
       runningRef.current = false;
     }
-  }, [getPrivyToken, token]);
+  }, [ensureAppSession, token]);
 
   const offRamp = useCallback(() => {
     alert("Off-ramp is coming soon.");
