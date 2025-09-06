@@ -9,6 +9,7 @@ import Deposit from "@/components/actions/Deposit";
 import UserTransfer from "@/components/actions/UserTransfer";
 import Sell from "@/components/actions/Sell";
 import Withdraw from "@/components/actions/Withdraw";
+import CancelTransfer from "@/components/actions/CancelTransfer"; // ⬅️ NEW
 import { PublicKey } from "@solana/web3.js";
 import Move from "../actions/Move";
 
@@ -45,11 +46,11 @@ type QuickActionsProps = {
 
   move?: MoveConfig;
   withdraw?: WithdrawConfig;
-  transfer?: TransferConfig; // ⬅️ NEW
+  transfer?: TransferConfig;
 
   onMoveOpen?: () => void;
   onWithdrawOpen?: () => void;
-  onTransferOpen?: () => void; // ⬅️ NEW
+  onTransferOpen?: () => void;
 };
 
 type ActiveModal = null | "deposit" | "withdraw" | "move" | "transfer";
@@ -142,7 +143,7 @@ export default function QuickActions({
         <ActionButton
           label="Transfer"
           icon={<ArrowRightLeft size={12} aria-hidden />}
-          onClick={openTransferModal} // ⬅️ open the modal
+          onClick={openTransferModal}
           disabled={disabled}
         />
         <ActionButton
@@ -295,7 +296,7 @@ function WithdrawModal({
 
   // Validate key if provided
   const valid = useMemo(() => {
-    if (!withdraw?.depositOwner) return true; // allow UserTransfer to use context fallback
+    if (!withdraw?.depositOwner) return true;
     try {
       new PublicKey(withdraw.depositOwner);
       return true;
@@ -390,8 +391,10 @@ function TransferModal({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  // If a depositOwner is provided, validate it; otherwise UserTransfer will
-  // use the current user from context.
+  type TransferTab = "send" | "unclaimed";
+  const [tab, setTab] = useState<TransferTab>("send");
+
+  // If a depositOwner is provided, validate it; otherwise UserTransfer will use context.
   const keyValid = useMemo(() => {
     if (!transfer?.depositOwner) return true;
     try {
@@ -424,15 +427,24 @@ function TransferModal({
       {/* Scrollable wrapper */}
       <div className="relative mx-auto flex min-h-screen items-center justify-center p-4 overflow-y-auto overscroll-contain">
         {/* Panel */}
-        <div className="pointer-events-auto w-full max-w-lg rounded-2xl border border-white/10 bg-zinc-900/95 shadow-2xl flex max-h-[90vh] flex-col overflow-hidden">
+        <div className="pointer-events-auto w-full max-w-3xl rounded-2xl border border-white/10 bg-zinc-900/95 shadow-2xl flex max-h-[90vh] flex-col overflow-hidden">
           <h2 id="transfer-modal-title" className="sr-only">
-            Transfer to a Haven user
+            Transfer
           </h2>
 
-          {/* Header */}
+          {/* Header with tabs */}
           <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 shrink-0">
-            <div className="text-sm font-semibold text-white/90">
-              Send to a Haven user
+            <div className="flex items-center gap-1">
+              <Tab
+                active={tab === "send"}
+                onClick={() => setTab("send")}
+                label="Send"
+              />
+              <Tab
+                active={tab === "unclaimed"}
+                onClick={() => setTab("unclaimed")}
+                label="Unclaimed (sent)"
+              />
             </div>
             <button
               className="rounded-lg border border-white/10 bg-white/5 p-1.5 hover:bg-white/10 transition"
@@ -445,20 +457,26 @@ function TransferModal({
 
           {/* Body */}
           <div className="flex-1 overflow-y-auto p-4 md:p-6">
-            {!keyValid ? (
-              <div className="text-xs text-red-400">
-                Invalid chequing (deposit) owner public key.
-              </div>
+            {tab === "send" ? (
+              !keyValid ? (
+                <div className="text-xs text-red-400">
+                  Invalid chequing (deposit) owner public key.
+                </div>
+              ) : (
+                <div className="min-h-[320px]">
+                  <UserTransfer
+                    fromOwnerBase58={transfer?.depositOwner}
+                    onSuccess={(sig) => {
+                      transfer?.onSuccess?.(sig);
+                      onClose(); // optional auto-close on success
+                    }}
+                  />
+                </div>
+              )
             ) : (
               <div className="min-h-[320px]">
-                <UserTransfer
-                  fromOwnerBase58={transfer?.depositOwner}
-                  onSuccess={(sig) => {
-                    transfer?.onSuccess?.(sig);
-                    // optional: auto-close & refresh after success
-                     onClose();
-                  }}
-                />
+                {/* Lists your pending invites (sent) + lets you cancel */}
+                <CancelTransfer />
               </div>
             )}
           </div>
