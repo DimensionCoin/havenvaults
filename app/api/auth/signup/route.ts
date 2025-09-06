@@ -5,7 +5,6 @@ import { connect } from "@/lib/db";
 import User from "@/models/User";
 import type { IUser } from "@/models/User";
 import jwt from "jsonwebtoken";
-import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,15 +26,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Read URL params (do NOT read body yet)
   const url = new URL(req.url);
   const wantRedirect =
     url.searchParams.get("redirect") === "1" ||
     url.searchParams.get("redirect") === "true";
 
-  // Read body once (optional, for legacy clients that send {accessToken})
   const body = await req.json().catch(() => null);
-  // Preferred: Authorization: Bearer <token>
   const auth = req.headers.get("authorization");
   const headerToken = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : null;
   const accessToken =
@@ -65,25 +61,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4) Ensure embedded Solana wallet
+    // 4) Rely on Privy auto-create for embedded Solana wallet.
+    //    Give it a moment to appear (auto-link can be async).
     let solWallet = extractEmbeddedSolana(privyUser);
     if (!solWallet) {
-      try {
-        const idem = randomUUID();
-        const created = await privy.walletApi.createWallet({
-          chainType: "solana",
-          owner: { userId: privyId },
-          idempotencyKey: idem,
-        });
-        // Re-fetch to see link
+      for (let i = 0; i < 4 && !solWallet; i++) {
+        await new Promise((r) => setTimeout(r, 250));
         privyUser = await privy.getUser(privyId);
-        solWallet = extractEmbeddedSolana(privyUser) ?? {
-          walletId: created.id,
-          address: created.address,
-          chainType: "solana",
-        };
-      } catch (e) {
-        console.error("Privy wallet create failed:", e);
+        solWallet = extractEmbeddedSolana(privyUser);
       }
     }
 
@@ -137,8 +122,6 @@ export async function POST(req: NextRequest) {
       maxAge: SESSION_DURATION,
     });
 
-    // Keep default behavior “no redirect”.
-    // If some legacy screen wants the old behavior, call /api/auth/signup?redirect=1
     if (wantRedirect) {
       return NextResponse.redirect(new URL("/onboarding", url.origin), {
         headers: json.headers,

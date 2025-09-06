@@ -1,6 +1,5 @@
 // app/api/auth/onboarding/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { randomUUID } from "crypto";
 import { z } from "zod";
 
 import { connect } from "@/lib/db";
@@ -34,7 +33,6 @@ const OnboardingSchema = z.object({
     .string()
     .length(2)
     .transform((s) => s.toUpperCase()),
-  // FIX: .toUpperCase() isn't a Zod method; use transform()
   displayCurrency: z
     .string()
     .length(3)
@@ -48,7 +46,7 @@ const OnboardingSchema = z.object({
     .optional(),
 });
 
-// Local types to keep TS simple for Turbopack
+// Local types to keep TS simple
 type DepositWallet = {
   walletId?: string;
   address?: string;
@@ -63,13 +61,23 @@ type ConsentEntry = {
 
 export async function POST(req: NextRequest) {
   try {
-    // 1) Authenticate via your app session cookie FROM REQUEST
+    // 1) Authenticate via app session cookie
     const sessionToken = req.cookies.get("__session")?.value;
     const claims = sessionToken ? verifySession(sessionToken) : null;
     if (!claims) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    const { privyId, userId } = claims;
+
+    // Claims come from your app session JWT (see lib/auth.ts)
+    const userId: string | undefined = claims.userId;
+    const privyId: string | undefined = claims.privyId;
+
+    if (!userId || !privyId) {
+      return NextResponse.json(
+        { error: "Invalid session (missing userId or privyId)" },
+        { status: 401 }
+      );
+    }
 
     // 2) Parse & validate body
     const body = await req.json().catch(() => ({}));
@@ -104,17 +112,17 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 4) Ensure embedded Solana wallet exists; create if missing
+    // 4) Ensure embedded Solana wallet exists; create if missing (idempotent)
     if (!user.depositWallet?.address) {
       let sol = extractEmbeddedSolana(await privy.getUser(privyId));
       if (!sol) {
         const created = await privy.walletApi.createWallet({
           chainType: "solana",
           owner: { userId: privyId },
-          idempotencyKey: randomUUID(),
+          idempotencyKey: `deposit-${privyId}`, // stable key prevents dupes
         });
 
-        // best effort: re-fetch so shapes match your extractor; fallback to create response
+        // best effort: re-fetch to normalize; fallback to create response
         sol =
           extractEmbeddedSolana(await privy.getUser(privyId)) ??
           ({
@@ -139,6 +147,7 @@ export async function POST(req: NextRequest) {
     if (data.displayCurrency) user.displayCurrency = data.displayCurrency;
     if (data.phoneNumber) user.phoneNumber = data.phoneNumber;
     user.dob = new Date(data.dob);
+
     const addr: Address = {
       line1: data.address.line1,
       line2: data.address.line2 ?? "",
@@ -162,7 +171,7 @@ export async function POST(req: NextRequest) {
     if (data.consents?.tos) pushOnce("tos", TOS_VERSION);
     if (data.consents?.privacy) pushOnce("privacy", PRIVACY_VERSION);
 
-    // 7) Instant-approval gate (name + full address + DOB already validated above)
+    // 7) Instant-approval gate
     const hasFullAddress =
       !!data.address?.line1 &&
       !!data.address?.city &&
@@ -172,7 +181,6 @@ export async function POST(req: NextRequest) {
       data.address.country.length === 2;
 
     const readyForInstantApproval = hasFullAddress && !!data.dob;
-
     user.kycStatus = readyForInstantApproval ? "approved" : "pending";
     user.status = readyForInstantApproval ? "active" : "pending";
 
