@@ -10,6 +10,7 @@ import { useUser } from "@/providers/UserProvider";
 import { useMemo } from "react";
 import toast from "react-hot-toast";
 import Link from "next/link";
+import ClaimBanner from "@/components/dash/ClaimBanner";
 
 export default function DashboardPage() {
   const { user } = useUser();
@@ -49,6 +50,7 @@ export default function DashboardPage() {
     <div className="min-h-screen">
       <div className="mx-auto w-full max-w-6xl px-3 md:px-4 py-6 md:py-10">
           <div className="space-y-6 md:space-y-8">
+            <ClaimBanner/>
             <Hero />
 
             {/* KYC pending banner (optional UI) */}

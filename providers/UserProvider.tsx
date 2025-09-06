@@ -18,6 +18,15 @@ type EmbeddedWallet = {
   chainType: "solana";
 } | null;
 
+type PendingEmailClaim = {
+  id: string;
+  amountUnits: number; // USDC (6dp)
+  currency: string; // e.g., "USDC"
+  tokenExpiresAt: string; // ISO timestamp
+  createdAt: string; // ISO timestamp
+  // (sender info is fetched by the banner via /pending/list using the token)
+};
+
 type PublicUser = {
   id: string;
   privyId: string;
@@ -36,6 +45,11 @@ type PublicUser = {
   savingsConsent?: { enabled?: boolean; acceptedAt?: string; version?: string };
   createdAt?: string;
   updatedAt?: string;
+
+  /** ✅ New fields for pending email claims */
+  hasPendingEmailClaims?: boolean; // quick boolean for banner visibility
+  pendingEmailClaims?: PendingEmailClaim[]; // optional lightweight list
+  pendingEmailClaimsToken?: string; // short-lived token for /pending/list
 };
 
 type UserContextValue = {
@@ -60,9 +74,8 @@ const PUBLIC_ROUTES = new Set<string>([
 
 function isPublicPath(pathname: string) {
   if (PUBLIC_ROUTES.has(pathname)) return true;
-  // ✅ Treat all claim routes as public
+  // Treat all claim routes as public (e.g., /claim/:token)
   if (pathname === "/claim" || pathname.startsWith("/claim/")) return true;
-  // (Optional) If you have a finish step like /claim/finish, the startsWith above covers it
   return false;
 }
 
@@ -99,25 +112,30 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (!res.ok) {
-        // treat as anonymous on error
+        // Treat as anonymous on error
         setUser(null);
         if (!isPublicPath(pathname)) router.replace("/sign-in");
         return;
       }
 
       const data = (await res.json()) as PublicUser;
-      setUser(data);
+
+      // Ensure optional fields exist so consumers can rely on them safely
+      const normalized: PublicUser = {
+        ...data,
+        hasPendingEmailClaims: data.hasPendingEmailClaims ?? false,
+        pendingEmailClaims: data.pendingEmailClaims ?? [],
+        pendingEmailClaimsToken: data.pendingEmailClaimsToken, // may be undefined
+      };
+
+      setUser(normalized);
 
       // Gatekeeping / redirection rules (only on protected routes)
       if (!isPublicPath(pathname)) {
-        if (data.kycStatus === "approved" && data.status === "active") {
-          // If already approved/active but somehow on onboarding/pending, go to dashboard
-          // (No-op if already on a protected normal route)
-        } else {
-          // Not approved/active → send to pending unless already on onboarding
-          if (pathname !== "/onboarding" && pathname !== "/kyc/pending") {
-            router.replace("/kyc/pending");
-          }
+        const ok =
+          normalized.kycStatus === "approved" && normalized.status === "active";
+        if (!ok && pathname !== "/onboarding" && pathname !== "/kyc/pending") {
+          router.replace("/kyc/pending");
         }
       }
     } catch (e) {
@@ -132,7 +150,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
   // Initial fetch when Privy ready state stabilizes or path changes
   useEffect(() => {
     if (!ready) return; // wait for Privy to init (so we know auth status)
-    // For public routes, we still try to fetch (to show header w/ name, etc.), but never redirect away.
+    // For public routes, we still fetch (to show header + claims), but never redirect away.
     // For protected routes, fetch will redirect as needed.
     fetchMe();
   }, [ready, authenticated, pathname, fetchMe]);
